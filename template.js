@@ -1,18 +1,12 @@
-/// <reference path="./server-gtm-sandboxed-apis.d.ts" />
-
 const encodeUriComponent = require('encodeUriComponent');
 const getAllEventData = require('getAllEventData');
-const getContainerVersion = require('getContainerVersion');
-const getRemoteAddress = require('getRemoteAddress');
 const getRequestHeader = require('getRequestHeader');
-const getTimestampMillis = require('getTimestampMillis');
 const getType = require('getType');
 const JSON = require('JSON');
-const logToConsole = require('logToConsole');
 const makeString = require('makeString');
 const makeTableMap = require('makeTableMap');
-const Math = require('Math');
 const sendHttpRequest = require('sendHttpRequest');
+const sha256Sync = require('sha256Sync');
 const templateDataStorage = require('templateDataStorage');
 
 /*==============================================================================
@@ -23,10 +17,8 @@ const eventData = getAllEventData();
 if (shouldExitEarly(data, eventData)) return;
 
 const api = data.apiSelect;
-const endpoint = data.coreEndpoint || data.loyaltyEndpoint;
+const endpoint = api === 'core' ? data.coreEndpoint : data.loyaltyEndpoint;
 const requestConfig = requestConfigMap(api, endpoint);
-
-if (!requestConfig) return;
 
 sendRequest(api, requestConfig);
 
@@ -38,16 +30,14 @@ if (data.useOptimisticScenario) {
   Vendor related functions
 ==============================================================================*/
 
-function getStoredAuthToken(tokenStorageKey) {
-  const storedToken = templateDataStorage.getItemCopy(tokenStorageKey);
-  if (storedToken !== null) return storedToken;
+function getCoreTokenCacheKey(storeId, apiSecret) {
+  return sha256Sync('yotpo_core_token_' + storeId + '_' + apiSecret);
 }
 
 function generateNewToken(apiSecret, storeId) {
-  let accessToken;
-  const endpointPath = '/access_tokens';
   const requestBody = JSON.stringify({ secret: apiSecret });
-  const generateTokenUrl = 'https://api.yotpo.com/core/v3/stores/' + enc(storeId) + endpointPath;
+  const generateTokenUrl =
+    'https://api.yotpo.com/core/v3/stores/' + enc(storeId) + '/access_tokens';
 
   return sendHttpRequest(
     generateTokenUrl,
@@ -59,36 +49,21 @@ function generateNewToken(apiSecret, storeId) {
   )
     .then((response) => {
       const responseBody = JSON.parse(response.body || '{}');
-      if (!data.useOptimisticScenario) {
-        if (response.statusCode >= 200 && response.statusCode < 300) {
-          accessToken = responseBody.hasOwnProperty('access_token')
-            ? responseBody.access_token
-            : null;
-
-          if (accessToken !== null) {
-            templateDataStorage.setItemCopy(
-              'stape_ytp_token' + (data.coreStoreId || data.loyaltyGUID),
-              accessToken
-            );
-          }
-          return accessToken;
-        }
+      if (response.statusCode < 200 || response.statusCode >= 300 || !responseBody.access_token) {
+        return undefined;
       }
+
+      templateDataStorage.setItemCopy(
+        getCoreTokenCacheKey(storeId, apiSecret),
+        responseBody.access_token
+      );
+      return responseBody.access_token;
     })
-    .catch((error) => {
-      log({
-        Name: 'Yotpo',
-        Type: 'Message',
-        EventName: 'generate_token',
-        Message: 'Token generation failed or timed out',
-        Reason: JSON.stringify(error)
-      });
-      return null;
-    });
+    .catch(() => undefined);
 }
 
 function requestConfigMap(api, endpoint) {
-  const coreBaseUrl = 'https://api.yotpo.com/core/v3/stores/' + data.coreStoreId;
+  const coreBaseUrl = 'https://api.yotpo.com/core/v3/stores/' + enc(data.coreStoreId);
   const loyaltyBaseUrl = 'https://loyalty.yotpo.com/api/v2';
   const coreAPIHeaders = {
     accept: 'application/json',
@@ -101,9 +76,9 @@ function requestConfigMap(api, endpoint) {
     'X-GUID': data.loyaltyGUID
   };
 
-  if (api === 'core') {
-    if (endpoint === 'createOrUpdateCustomer') {
-      return {
+  const configByApiAndEndpoint = {
+    core: {
+      createOrUpdateCustomer: {
         baseUrl: coreBaseUrl,
         endpointPath: '/customers',
         body: getCreateOrUpdateCustomerRequestBody,
@@ -111,11 +86,8 @@ function requestConfigMap(api, endpoint) {
           method: 'PATCH',
           headers: coreAPIHeaders
         }
-      };
-    }
-
-    if (endpoint === 'createOrder') {
-      return {
+      },
+      createOrder: {
         baseUrl: coreBaseUrl,
         endpointPath: '/orders',
         body: getCreateOrderRequestBody,
@@ -123,11 +95,8 @@ function requestConfigMap(api, endpoint) {
           method: 'POST',
           headers: coreAPIHeaders
         }
-      };
-    }
-
-    if (endpoint === 'createOrderFulfillment') {
-      return {
+      },
+      createOrderFulfillment: {
         baseUrl: coreBaseUrl,
         endpointPath: '/orders/' + enc(data.orderId) + '/fulfillments',
         body: getCreateOrderFulfillmentRequestBody,
@@ -135,11 +104,8 @@ function requestConfigMap(api, endpoint) {
           method: 'POST',
           headers: coreAPIHeaders
         }
-      };
-    }
-
-    if (endpoint === 'sendAggregatedOrder') {
-      return {
+      },
+      sendAggregatedOrder: {
         baseUrl: coreBaseUrl,
         endpointPath: '/register_purchase',
         body: getAggregatedOrderRequestBody,
@@ -147,13 +113,10 @@ function requestConfigMap(api, endpoint) {
           method: 'POST',
           headers: coreAPIHeaders
         }
-      };
-    }
-  }
-
-  if (api === 'loyalty') {
-    if (endpoint === 'createLoyaltyCustomer') {
-      return {
+      }
+    },
+    loyalty: {
+      createLoyaltyCustomer: {
         baseUrl: loyaltyBaseUrl,
         endpointPath: '/customers',
         body: getCreateLoyaltyCustomerRequestBody,
@@ -161,11 +124,8 @@ function requestConfigMap(api, endpoint) {
           method: 'POST',
           headers: loyaltyAPIHeaders
         }
-      };
-    }
-
-    if (endpoint === 'createLoyaltyCustomerAction') {
-      return {
+      },
+      createLoyaltyCustomerAction: {
         baseUrl: loyaltyBaseUrl,
         endpointPath: '/actions',
         body: getCreateLoyaltyCustomerActionRequestBody,
@@ -173,10 +133,8 @@ function requestConfigMap(api, endpoint) {
           method: 'POST',
           headers: loyaltyAPIHeaders
         }
-      };
-    }
-    if (endpoint === 'createLoyaltyOrder') {
-      return {
+      },
+      createLoyaltyOrder: {
         baseUrl: loyaltyBaseUrl,
         endpointPath: '/orders',
         body: getCreateLoyaltyOrderRequestBody,
@@ -184,152 +142,149 @@ function requestConfigMap(api, endpoint) {
           method: 'POST',
           headers: loyaltyAPIHeaders
         }
-      };
+      }
     }
+  };
+
+  return configByApiAndEndpoint[api][endpoint];
+}
+
+function getRequestBodyObject(
+  parametersTableName,
+  customParametersTableName,
+  customPropertiesPrefix
+) {
+  const flatObject = data[parametersTableName]
+    ? makeTableMap(data[parametersTableName], 'key', 'value')
+    : {};
+
+  if (customParametersTableName) {
+    addCustomProperties(flatObject, data[customParametersTableName], customPropertiesPrefix);
   }
+
+  return convertDotNotationFlatObjectToNestedObject(flatObject);
+}
+
+function addCustomProperties(flatObject, customParametersTable, prefix) {
+  if (!customParametersTable || !customParametersTable.length) return;
+
+  const customProperties = makeTableMap(customParametersTable, 'key', 'value');
+  for (const key in customProperties) {
+    flatObject[prefix + key] = customProperties[key];
+  }
+}
+
+function addAutoMappedIpAndUserAgent(bodyObject, eventData) {
+  if (!bodyObject.ip_address && eventData.ip_override) {
+    bodyObject.ip_address = eventData.ip_override;
+  }
+  if (!bodyObject.user_agent && eventData.user_agent) {
+    bodyObject.user_agent = eventData.user_agent;
+  }
+
+  return bodyObject;
 }
 
 function getCreateOrUpdateCustomerRequestBody() {
-  let customerProperties = data.createOrUpdateCustomerParameters
-    ? makeTableMap(data.createOrUpdateCustomerParameters, 'key', 'value')
-    : {};
-
-  const customerCustomProperties = data.createOrUpdateCustomerCustomParameters
-    ? makeTableMap(data.createOrUpdateCustomerCustomParameters, 'key', 'value')
-    : {};
-  customerProperties = convertDotNotationFlatObjectToNestedObject(customerProperties);
-  customerProperties['custom_properties'] =
-    convertDotNotationFlatObjectToNestedObject(customerCustomProperties);
-
-  if (!customerProperties.ip_address) customerProperties.ip_address = getRemoteAddress();
-  if (!customerProperties.user_agent)
-    customerProperties.user_agent = getRequestHeader('User-Agent');
-
-  return JSON.stringify(customerProperties);
+  return JSON.stringify(
+    getRequestBodyObject(
+      'createOrUpdateCustomerParameters',
+      'createOrUpdateCustomerCustomParameters',
+      'customer.'
+    )
+  );
 }
 
 function getCreateOrderRequestBody() {
-  let orderProperties = data.createOrderParameters
-    ? makeTableMap(data.createOrderParameters, 'key', 'value')
-    : {};
-
-  orderProperties = convertDotNotationFlatObjectToNestedObject(orderProperties);
-  return JSON.stringify(orderProperties);
+  return JSON.stringify(
+    getRequestBodyObject('createOrderParameters', 'createOrderAdditionalParameters', '')
+  );
 }
 
 function getCreateOrderFulfillmentRequestBody() {
-  let fulfillmentProperties = data.createOrderFulfillmentParameters
-    ? makeTableMap(data.createOrderFulfillmentParameters, 'key', 'value')
-    : {};
-  fulfillmentProperties = convertDotNotationFlatObjectToNestedObject(fulfillmentProperties);
-  return JSON.stringify(fulfillmentProperties);
+  return JSON.stringify(getRequestBodyObject('createOrderFulfillmentParameters'));
 }
 
 function getAggregatedOrderRequestBody() {
-  let orderProperties = data.sendAggregatedOrderParameters
-    ? makeTableMap(data.sendAggregatedOrderParameters, 'key', 'value')
-    : {};
-  orderProperties = convertDotNotationFlatObjectToNestedObject(orderProperties);
-
-  const orderCustomProperties = data.createOrUpdateCustomerCustomParameters
-    ? makeTableMap(data.createOrUpdateCustomerCustomParameters, 'key', 'value')
-    : {};
-
-  orderProperties['custom_properties'] =
-    convertDotNotationFlatObjectToNestedObject(orderCustomProperties);
-  return JSON.stringify(orderProperties);
+  return JSON.stringify(
+    getRequestBodyObject(
+      'sendAggregatedOrderParameters',
+      'sendAggregatedOrderAdditionalParameters',
+      ''
+    )
+  );
 }
 
 function getCreateLoyaltyCustomerRequestBody() {
-  let customerProperties = data.createLoyaltyCustomerParameters
-    ? makeTableMap(data.createLoyaltyCustomerParameters, 'key', 'value')
-    : {};
-  customerProperties = convertDotNotationFlatObjectToNestedObject(customerProperties);
-
-  if (!customerProperties.ip_address) customerProperties.ip_address = getRemoteAddress();
-  if (!customerProperties.user_agent)
-    customerProperties.user_agent = getRequestHeader('User-Agent');
-
-  return JSON.stringify(customerProperties);
+  return JSON.stringify(getRequestBodyObject('createLoyaltyCustomerParameters'));
 }
 
 function getCreateLoyaltyCustomerActionRequestBody() {
-  let actionProperties = data.createLoyaltyCustomerActionParameters
-    ? makeTableMap(data.createLoyaltyCustomerActionParameters, 'key', 'value')
-    : {};
-  actionProperties = convertDotNotationFlatObjectToNestedObject(actionProperties);
-
-  if (!actionProperties.ip_address) actionProperties.ip_address = getRemoteAddress();
-  if (!actionProperties.user_agent) actionProperties.user_agent = getRequestHeader('User-Agent');
-
-  return JSON.stringify(actionProperties);
+  return JSON.stringify(
+    addAutoMappedIpAndUserAgent(
+      getRequestBodyObject('createLoyaltyCustomerActionParameters'),
+      eventData
+    )
+  );
 }
 
 function getCreateLoyaltyOrderRequestBody() {
-  let orderProperties = data.createLoyaltyOrder
-    ? makeTableMap(data.createLoyaltyOrder, 'key', 'value')
-    : {};
-  orderProperties = convertDotNotationFlatObjectToNestedObject(orderProperties);
-
-  if (!orderProperties.ip_address) orderProperties.ip_address = getRemoteAddress();
-  if (!orderProperties.user_agent) orderProperties.user_agent = getRequestHeader('User-Agent');
-
-  return JSON.stringify(orderProperties);
+  return JSON.stringify(
+    addAutoMappedIpAndUserAgent(
+      getRequestBodyObject(
+        'createLoyaltyOrderParameters',
+        'createLoyaltyOrderAdditionalParameters',
+        ''
+      ),
+      eventData
+    )
+  );
 }
 
 function sendRequest(api, requestConfig) {
-  if (api === 'core') {
-    let accessToken = getStoredAuthToken('stape_ytp_token' + data.coreStoreId);
-    if (!accessToken) {
-      return generateNewToken(data.coreApiSecret, data.coreStoreId).then((accessToken) => {
-        return callApi(api, requestConfig, accessToken);
-      });
-    }
-    if (getType(accessToken) === 'string') {
-      return callApi(api, requestConfig, accessToken);
-    }
-  }
+  if (api !== 'core') return callApi(api, requestConfig);
 
-  if (api === 'loyalty') {
-    return callApi(api, requestConfig);
-  }
+  const tokenCacheKey = getCoreTokenCacheKey(data.coreStoreId, data.coreApiSecret);
+  const cachedToken = templateDataStorage.getItemCopy(tokenCacheKey);
+  if (cachedToken) return callApi(api, requestConfig, cachedToken);
+
+  return generateNewToken(data.coreApiSecret, data.coreStoreId).then((accessToken) => {
+    if (accessToken) return callApi(api, requestConfig, accessToken);
+    if (!data.useOptimisticScenario) return data.gtmOnFailure();
+  });
 }
 
-function callApi(api, requestConfig, accessToken, retryTokenGeneratorCounter) {
-  retryTokenGeneratorCounter = retryTokenGeneratorCounter || 0;
-  if (retryTokenGeneratorCounter > 1) return;
+function callApi(api, requestConfig, accessToken, isRetry) {
   const url = requestConfig.baseUrl + requestConfig.endpointPath;
   const requestOptions = requestConfig.options;
   const body = requestConfig.body();
 
-  if (api === 'core') {
-    requestOptions.headers['X-Yotpo-Token'] = accessToken;
-  }
+  // The access token only applies to the Core API; Loyalty authenticates with the
+  // API Key/GUID headers already set on requestConfig, so nothing to add here.
+  if (api === 'core') requestOptions.headers['X-Yotpo-Token'] = accessToken;
 
   return sendHttpRequest(url, requestOptions, body)
     .then((response) => {
-      if (!data.useOptimisticScenario) {
-        if (response.statusCode >= 200 && response.statusCode < 300) return data.gtmOnSuccess();
-        else if (response.statusCode === 401 && retryTokenGeneratorCounter < 1) {
-          return generateNewToken(data.coreApiSecret, data.coreStoreId).then((newAccessToken) => {
-            if (newAccessToken) {
-              retryTokenGeneratorCounter++;
-              return callApi(api, requestConfig, newAccessToken, retryTokenGeneratorCounter);
-            } else {
-              return data.gtmOnFailure();
-            }
-          });
-        } else return data.gtmOnFailure();
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        // The optimistic scenario already called gtmOnSuccess() synchronously above, so it's
+        // skipped here to avoid a second, out-of-band callback after GTM has already moved on.
+        if (!data.useOptimisticScenario) return data.gtmOnSuccess();
+        return;
       }
+
+      // The token retry only applies to the Core API, and always runs even under the
+      // optimistic scenario, so a stale/expired cached token still gets refreshed for the
+      // next real request.
+      if (api === 'core' && !isRetry && response.statusCode === 401) {
+        return generateNewToken(data.coreApiSecret, data.coreStoreId).then((newAccessToken) => {
+          if (newAccessToken) return callApi(api, requestConfig, newAccessToken, true);
+          if (!data.useOptimisticScenario) return data.gtmOnFailure();
+        });
+      }
+
+      if (!data.useOptimisticScenario) return data.gtmOnFailure();
     })
-    .catch((error) => {
-      log({
-        Name: 'Yotpo',
-        Type: 'Message',
-        EventName: api + '-' + requestConfig.endpointPath,
-        Message: 'API call failed or timed out',
-        Reason: JSON.stringify(error)
-      });
+    .catch(() => {
       if (!data.useOptimisticScenario) return data.gtmOnFailure();
     });
 }
@@ -345,7 +300,6 @@ function shouldExitEarly(data, eventData) {
   }
 
   const url = eventData.page_location || getRequestHeader('referer');
-
   if (url && url.lastIndexOf('https://gtm-msr.appspot.com/', 0) === 0) {
     data.gtmOnSuccess();
     return true;
@@ -362,7 +316,7 @@ function isConsentGivenOrNotRequired(data, eventData) {
 function convertDotNotationFlatObjectToNestedObject(flatObject) {
   const rootObject = {};
 
-  for (let flatKey in flatObject) {
+  for (const flatKey in flatObject) {
     const keys = flatKey.split('.');
     let current = rootObject;
 
@@ -371,7 +325,7 @@ function convertDotNotationFlatObjectToNestedObject(flatObject) {
       const nextKey = keys[i + 1];
 
       if (current[currentKey] === undefined || current[currentKey] === null) {
-        const isNextKeyNumeric = nextKey.match('[0-9]+');
+        const isNextKeyNumeric = nextKey.match('^[0-9]+$');
         current[currentKey] = isNextKeyNumeric ? [] : {};
       }
 
@@ -385,82 +339,7 @@ function convertDotNotationFlatObjectToNestedObject(flatObject) {
   return rootObject;
 }
 
-function enc(data) {
-  if (['null', 'undefined'].indexOf(getType(data)) !== -1) data = '';
-  return encodeUriComponent(makeString(data));
-}
-
-function convertTimestampToISO(timestamp) {
-  const leapYear = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  const nonLeapYear = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  const secToMs = (s) => s * 1000;
-  const minToMs = (m) => m * secToMs(60);
-  const hoursToMs = (h) => h * minToMs(60);
-  const daysToMs = (d) => d * hoursToMs(24);
-  const padStart = (value, length) => {
-    let result = makeString(value);
-    while (result.length < length) {
-      result = '0' + result;
-    }
-    return result;
-  };
-
-  const fourYearsInMs = daysToMs(365 * 4 + 1);
-  let year = 1970 + Math.floor(timestamp / fourYearsInMs) * 4;
-  timestamp = timestamp % fourYearsInMs;
-
-  while (true) {
-    let isLeapYear = year % 4 === 0;
-    let nextTimestamp = timestamp - daysToMs(isLeapYear ? 366 : 365);
-    if (nextTimestamp < 0) {
-      break;
-    }
-    timestamp = nextTimestamp;
-    year = year + 1;
-  }
-
-  const daysByMonth = year % 4 === 0 ? leapYear : nonLeapYear;
-
-  let month = 0;
-  for (let i = 0; i < daysByMonth.length; i++) {
-    const msInThisMonth = daysToMs(daysByMonth[i]);
-    if (timestamp > msInThisMonth) {
-      timestamp = timestamp - msInThisMonth;
-    } else {
-      month = i + 1;
-      break;
-    }
-  }
-
-  const date = Math.ceil(timestamp / daysToMs(1));
-  timestamp = timestamp - daysToMs(date - 1);
-  const hours = Math.floor(timestamp / hoursToMs(1));
-  timestamp = timestamp - hoursToMs(hours);
-  const minutes = Math.floor(timestamp / minToMs(1));
-  timestamp = timestamp - minToMs(minutes);
-  const sec = Math.floor(timestamp / secToMs(1));
-  timestamp = timestamp - secToMs(sec);
-  const milliSeconds = timestamp;
-
-  return (
-    year +
-    '-' +
-    padStart(month, 2) +
-    '-' +
-    padStart(date, 2) +
-    'T' +
-    padStart(hours, 2) +
-    ':' +
-    padStart(minutes, 2) +
-    ':' +
-    padStart(sec, 2) +
-    '.' +
-    padStart(milliSeconds, 3) +
-    'Z'
-  );
-}
-
-function log(rawDataToLog) {
-  rawDataToLog.TraceId = getRequestHeader('trace-id');
-  logToConsole(JSON.stringify(rawDataToLog));
+function enc(value) {
+  if (['null', 'undefined'].indexOf(getType(value)) !== -1) value = '';
+  return encodeUriComponent(makeString(value));
 }
