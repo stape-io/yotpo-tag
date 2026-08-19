@@ -28,7 +28,7 @@ scripts.
 
 ## Core API vs Loyalty API
 
-Each tag instance targets exactly one API — add a second tag if you need to send to both.
+Each tag instance targets exactly one API. Add a second tag if you need to send to both.
 
 | | Core API | Loyalty & Referrals API |
 | :--- | :--- | :--- |
