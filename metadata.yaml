@@ -1,5 +1,5 @@
 homepage: 'https://stape.io/'
 documentation: 'https://github.com/stape-io/yotpo-tag'
 versions:
-  - sha: <INITIAL HASH>
+  - sha: c46cc0a98ebd7586843028d8a3cb8a4d0303840c
     changeNotes: Initial release.
