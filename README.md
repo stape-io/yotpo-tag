@@ -96,3 +96,6 @@ array items (e.g. `line_items.0.sku`).
 
 The **Yotpo Tag for Google Tag Manager Server-Side** is developed and maintained by the
 [Stape Team](https://stape.io/) under the Apache 2.0 license.
+
+### GTM Gallery Status
+🔴 Not listed
